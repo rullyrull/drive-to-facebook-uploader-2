@@ -650,7 +650,7 @@ async function publishJob(
       .update({
         status: "success",
         facebook_video_id: videoId,
-        facebook_page_id: page.id,
+        facebook_page_id: pageKey || null,
         published_at: new Date().toISOString(),
         drive_deleted_at: driveDeletedAt,
         updated_at: new Date().toISOString(),
@@ -658,15 +658,16 @@ async function publishJob(
       .eq("id", next.id);
 
 
-    await reschedule(settings.schedule_times ?? ["13:00", "17:00", "19:00"]);
+    await reschedule(settings.schedule_times ?? ["13:00", "17:00", "19:00"], pageKey);
+    const pageName = page.name ? `[${page.name}] ` : "";
     return {
       checked: 1,
       uploaded: 1,
       failed: 0,
       skipped: 0,
       message: driveDeletedAt
-        ? `${file.name} tayang dan sudah dihapus dari Google Drive.`
-        : `${file.name} tayang, tetapi gagal dihapus dari Google Drive.`,
+        ? `${pageName}${file.name} tayang dan sudah dihapus dari Google Drive.`
+        : `${pageName}${file.name} tayang, tetapi gagal dihapus dari Google Drive.`,
     };
   } catch (error) {
     console.error("Posting gagal", file.name, error);
