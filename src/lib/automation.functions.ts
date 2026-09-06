@@ -41,6 +41,7 @@ export type DashboardData = {
     facebook_video_id: string | null;
     error_message: string | null;
     size_bytes: number | null;
+    facebook_page_id: string | null;
     created_at: string;
     updated_at: string;
     scheduled_at: string | null;
@@ -63,7 +64,7 @@ export const getDashboard = createServerFn({ method: "GET" }).handler(
     const { data: jobs } = await supabaseAdmin
       .from("upload_jobs")
       .select(
-        "id,file_name,status,facebook_video_id,error_message,size_bytes,created_at,updated_at,scheduled_at,drive_deleted_at",
+        "id,file_name,status,facebook_video_id,error_message,size_bytes,facebook_page_id,created_at,updated_at,scheduled_at,drive_deleted_at",
       )
       .order("updated_at", { ascending: false })
       .limit(50);

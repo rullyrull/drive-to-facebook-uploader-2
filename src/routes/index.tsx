@@ -175,6 +175,13 @@ function Home() {
                 >
                   <span className="truncate text-foreground">
                     {index + 1}. {job.file_name}
+                    {job.facebook_page_id ? (
+                      <span className="ml-2 text-muted-foreground">
+                        →{" "}
+                        {data?.facebookPages.find((p) => p.id === job.facebook_page_id)?.name ??
+                          "Halaman"}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="shrink-0 text-muted-foreground">
                     {job.scheduled_at
