@@ -21,6 +21,8 @@ export type FacebookPage = {
   page_id: string;
   access_token: string;
   is_active: boolean;
+  drive_folder_id?: string | null;
+  drive_folder_name?: string | null;
 };
 
 
@@ -361,14 +363,16 @@ async function loadSettings() {
 
 }
 
-/** Recomputes scheduled_at for every queued video, in queue order. */
-async function reschedule(times: string[]) {
+/** Recomputes scheduled_at for the queued videos of one page, in queue order. */
+async function reschedule(times: string[], pageKey: string) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { data: queued } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("upload_jobs")
     .select("id")
     .eq("status", "queued")
     .order("created_at", { ascending: true });
+  query = pageKey ? query.eq("facebook_page_id", pageKey) : query.is("facebook_page_id", null);
+  const { data: queued } = await query;
   const rows = queued ?? [];
   const slots = nextSlots(times, rows.length);
   for (let i = 0; i < rows.length; i += 1) {
