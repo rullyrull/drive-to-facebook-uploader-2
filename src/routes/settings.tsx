@@ -13,6 +13,7 @@ import {
   discoverFacebookPages,
   deleteFacebookPage,
   setActiveFacebookPage,
+  setPageFolder,
   type FacebookPage,
   type DiscoveredPage,
 } from "@/lib/automation.functions";
@@ -67,6 +68,7 @@ function SettingsPage() {
   const setActivePageFn = useServerFn(setActiveFacebookPage);
   const discoverFn = useServerFn(discoverFacebookPages);
   const addPagesFn = useServerFn(addFacebookPages);
+  const setPageFolderFn = useServerFn(setPageFolder);
 
   const [folderId, setFolderId] = useState("");
   const [autoEnabled, setAutoEnabled] = useState(false);
@@ -198,6 +200,16 @@ function SettingsPage() {
     mutationFn: (pageId: string | null) => setActivePageFn({ data: { pageId } }),
     onSuccess: () => {
       toast.success("Halaman aktif diperbarui");
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const pageFolder = useMutation({
+    mutationFn: (input: { pageId: string; folderId: string | null; folderName: string | null }) =>
+      setPageFolderFn({ data: input }),
+    onSuccess: () => {
+      toast.success("Folder halaman diperbarui");
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (e: Error) => toast.error(e.message),
