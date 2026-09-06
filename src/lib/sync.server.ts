@@ -480,7 +480,7 @@ export async function runSync(options: { force?: boolean } = {}): Promise<SyncRe
             .from("upload_jobs")
             .update({ drive_deleted_at: new Date().toISOString() })
             .eq("drive_file_id", file.id)
-            .eq("facebook_page_id", target.key || "");
+            .is(target.key ? "facebook_page_id" : "facebook_page_id", target.key ? target.key : null);
         } catch (e) {
           console.error("Gagal menghapus duplikat di Drive", file.name, e);
         }
