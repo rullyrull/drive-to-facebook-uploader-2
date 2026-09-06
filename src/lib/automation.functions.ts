@@ -7,6 +7,8 @@ export type FacebookPage = {
   page_id: string;
   access_token: string;
   is_active: boolean;
+  drive_folder_id: string | null;
+  drive_folder_name: string | null;
 };
 
 export type DashboardData = {
@@ -68,7 +70,7 @@ export const getDashboard = createServerFn({ method: "GET" }).handler(
 
     const { data: pages } = await supabaseAdmin
       .from("facebook_pages")
-      .select("id,name,page_id,access_token,is_active")
+      .select("id,name,page_id,access_token,is_active,drive_folder_id,drive_folder_name")
       .order("created_at", { ascending: true });
 
     const driveReady = Boolean(
@@ -220,6 +222,31 @@ export const setActiveFacebookPage = createServerFn({ method: "POST" })
         { id: "default", facebook_page_id: data.pageId, updated_at: new Date().toISOString() },
         { onConflict: "id" },
       );
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+/** Maps a Facebook Page to its own Drive folder (or clears the mapping). */
+export const setPageFolder = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        pageId: z.string().uuid(),
+        folderId: z.string().max(200).nullable(),
+        folderName: z.string().max(200).nullable(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error } = await supabaseAdmin
+      .from("facebook_pages")
+      .update({
+        drive_folder_id: data.folderId,
+        drive_folder_name: data.folderName,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", data.pageId);
     if (error) throw new Error(error.message);
     return { ok: true };
   });
