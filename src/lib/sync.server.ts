@@ -394,77 +394,124 @@ export type SyncResult = {
   message?: string;
 };
 
-/** Scans the watched folder and adds new videos to the posting queue. */
+type SyncTarget = {
+  /** facebook_pages row id, or "" for the legacy global folder */
+  key: string;
+  label: string;
+  folderId: string;
+};
+
+/** Every folder that should be scanned: one per mapped page plus the legacy global folder. */
+async function loadSyncTargets(): Promise<SyncTarget[]> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: pages } = await supabaseAdmin
+    .from("facebook_pages")
+    .select("id,name,page_id,is_active,drive_folder_id")
+    .eq("is_active", true);
+
+  const targets: SyncTarget[] = [];
+  for (const page of pages ?? []) {
+    if (page.drive_folder_id) {
+      targets.push({
+        key: page.id,
+        label: page.name ?? page.page_id,
+        folderId: page.drive_folder_id,
+      });
+    }
+  }
+
+  const settings = await loadSettings();
+  if (settings?.drive_folder_id) {
+    targets.push({ key: "", label: "folder bawaan", folderId: settings.drive_folder_id });
+  }
+  return targets;
+}
+
+/** Scans every mapped folder and adds new videos to each page's posting queue. */
 export async function runSync(options: { force?: boolean } = {}): Promise<SyncResult> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const settings = await loadSettings();
 
-  if (!settings?.drive_folder_id) {
-    return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Folder belum dipilih." };
-  }
-  if (!settings.auto_enabled && !options.force) {
+  if (settings && !settings.auto_enabled && !options.force) {
     return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Otomatis sedang mati." };
   }
 
-  const files = await listDriveVideos(settings.drive_folder_id);
+  const targets = await loadSyncTargets();
+  if (targets.length === 0) {
+    return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Folder belum dipilih." };
+  }
+
   const { data: known } = await supabaseAdmin
     .from("upload_jobs")
-    .select("drive_file_id,file_name,status");
+    .select("drive_file_id,file_name,status,facebook_page_id");
   const rows = known ?? [];
-  const seen = new Set(rows.map((row) => row.drive_file_id));
-  // names of videos already published: any Drive file with the same name is a duplicate
-  const publishedNames = new Set(
-    rows.filter((row) => row.status === "success").map((row) => normalizeName(row.file_name)),
-  );
-  const publishedIds = new Set(
-    rows.filter((row) => row.status === "success").map((row) => row.drive_file_id),
-  );
-  let queuedCount = rows.filter((row) => row.status === "queued").length;
-  const limit = settings.queue_limit ?? 10;
+  const limit = settings?.queue_limit ?? 10;
+  const times = settings?.schedule_times ?? ["13:00", "17:00", "19:00"];
 
+  let checked = 0;
   let added = 0;
   let skipped = 0;
   let removed = 0;
-  // oldest first so the queue follows the order videos were added to Drive
-  for (const file of [...files].reverse()) {
-    const isDuplicate = publishedIds.has(file.id) || publishedNames.has(normalizeName(file.name));
-    if (isDuplicate) {
-      try {
-        await driveDeleteFile(file.id);
-        removed += 1;
-        await supabaseAdmin
-          .from("upload_jobs")
-          .update({ drive_deleted_at: new Date().toISOString() })
-          .eq("drive_file_id", file.id);
-      } catch (e) {
-        console.error("Gagal menghapus duplikat di Drive", file.name, e);
+  let totalQueued = 0;
+
+  for (const target of targets) {
+    const files = await listDriveVideos(target.folderId);
+    checked += files.length;
+
+    // duplicates and queue size are tracked per page
+    const own = rows.filter((row) => (row.facebook_page_id ?? "") === target.key);
+    const seen = new Set(own.map((row) => row.drive_file_id));
+    const publishedNames = new Set(
+      own.filter((row) => row.status === "success").map((row) => normalizeName(row.file_name)),
+    );
+    const publishedIds = new Set(
+      own.filter((row) => row.status === "success").map((row) => row.drive_file_id),
+    );
+    let queuedCount = own.filter((row) => row.status === "queued").length;
+
+    // oldest first so the queue follows the order videos were added to Drive
+    for (const file of [...files].reverse()) {
+      const isDuplicate = publishedIds.has(file.id) || publishedNames.has(normalizeName(file.name));
+      if (isDuplicate) {
+        try {
+          await driveDeleteFile(file.id);
+          removed += 1;
+          await supabaseAdmin
+            .from("upload_jobs")
+            .update({ drive_deleted_at: new Date().toISOString() })
+            .eq("drive_file_id", file.id)
+            .eq("facebook_page_id", target.key || "");
+        } catch (e) {
+          console.error("Gagal menghapus duplikat di Drive", file.name, e);
+        }
+        continue;
       }
-      continue;
+      if (seen.has(file.id)) {
+        skipped += 1;
+        continue;
+      }
+      if (queuedCount >= limit) {
+        skipped += 1;
+        continue;
+      }
+      await supabaseAdmin.from("upload_jobs").insert({
+        drive_file_id: file.id,
+        file_name: file.name,
+        size_bytes: file.size ? Number(file.size) : null,
+        status: "queued",
+        error_message: null,
+        facebook_page_id: target.key || null,
+        updated_at: new Date().toISOString(),
+      });
+      queuedCount += 1;
+      added += 1;
     }
-    if (seen.has(file.id)) {
-      skipped += 1;
-      continue;
-    }
-    if (queuedCount >= limit) {
-      skipped += 1;
-      continue;
-    }
-    await supabaseAdmin.from("upload_jobs").insert({
-      drive_file_id: file.id,
-      file_name: file.name,
-      size_bytes: file.size ? Number(file.size) : null,
-      status: "queued",
-      error_message: null,
-      updated_at: new Date().toISOString(),
-    });
-    queuedCount += 1;
-    added += 1;
+    totalQueued += queuedCount;
+    await reschedule(times, target.key);
   }
 
-  await reschedule(settings.schedule_times ?? ["13:00", "17:00", "19:00"]);
-
   return {
-    checked: files.length,
+    checked,
     uploaded: 0,
     failed: 0,
     skipped,
@@ -474,8 +521,8 @@ export async function runSync(options: { force?: boolean } = {}): Promise<SyncRe
         added > 0 ? `${added} video baru masuk antrian.` : null,
         removed > 0 ? `${removed} video duplikat dihapus dari Google Drive.` : null,
         added === 0 && removed === 0
-          ? queuedCount > 0
-            ? `Tidak ada video baru. ${queuedCount} video menunggu jadwal.`
+          ? totalQueued > 0
+            ? `Tidak ada video baru. ${totalQueued} video menunggu jadwal.`
             : "Tidak ada video baru."
           : null,
       ]
