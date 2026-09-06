@@ -782,6 +782,9 @@ export async function getPublishedInsights(limit = 12): Promise<{
         avgWatchSeconds: 0,
       };
       try {
+        const token =
+          (job.facebook_page_id ? tokens.get(job.facebook_page_id) : undefined) ?? fallbackToken;
+        if (!token) return { ...base, error: "Token halaman tidak ditemukan" };
         const res = await fetch(
           `${GRAPH}/${job.facebook_video_id}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(token)}`,
         );
