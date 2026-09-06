@@ -476,11 +476,14 @@ export async function runSync(options: { force?: boolean } = {}): Promise<SyncRe
         try {
           await driveDeleteFile(file.id);
           removed += 1;
-          await supabaseAdmin
+          let cleanup = supabaseAdmin
             .from("upload_jobs")
             .update({ drive_deleted_at: new Date().toISOString() })
-            .eq("drive_file_id", file.id)
-            .is(target.key ? "facebook_page_id" : "facebook_page_id", target.key ? target.key : null);
+            .eq("drive_file_id", file.id);
+          cleanup = target.key
+            ? cleanup.eq("facebook_page_id", target.key)
+            : cleanup.is("facebook_page_id", null);
+          await cleanup;
         } catch (e) {
           console.error("Gagal menghapus duplikat di Drive", file.name, e);
         }
