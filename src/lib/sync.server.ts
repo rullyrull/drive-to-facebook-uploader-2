@@ -21,6 +21,8 @@ export type FacebookPage = {
   page_id: string;
   access_token: string;
   is_active: boolean;
+  drive_folder_id?: string | null;
+  drive_folder_name?: string | null;
 };
 
 
@@ -361,14 +363,16 @@ async function loadSettings() {
 
 }
 
-/** Recomputes scheduled_at for every queued video, in queue order. */
-async function reschedule(times: string[]) {
+/** Recomputes scheduled_at for the queued videos of one page, in queue order. */
+async function reschedule(times: string[], pageKey: string) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { data: queued } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("upload_jobs")
     .select("id")
     .eq("status", "queued")
     .order("created_at", { ascending: true });
+  query = pageKey ? query.eq("facebook_page_id", pageKey) : query.is("facebook_page_id", null);
+  const { data: queued } = await query;
   const rows = queued ?? [];
   const slots = nextSlots(times, rows.length);
   for (let i = 0; i < rows.length; i += 1) {
@@ -390,77 +394,127 @@ export type SyncResult = {
   message?: string;
 };
 
-/** Scans the watched folder and adds new videos to the posting queue. */
+type SyncTarget = {
+  /** facebook_pages row id, or "" for the legacy global folder */
+  key: string;
+  label: string;
+  folderId: string;
+};
+
+/** Every folder that should be scanned: one per mapped page plus the legacy global folder. */
+async function loadSyncTargets(): Promise<SyncTarget[]> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: pages } = await supabaseAdmin
+    .from("facebook_pages")
+    .select("id,name,page_id,is_active,drive_folder_id")
+    .eq("is_active", true);
+
+  const targets: SyncTarget[] = [];
+  for (const page of pages ?? []) {
+    if (page.drive_folder_id) {
+      targets.push({
+        key: page.id,
+        label: page.name ?? page.page_id,
+        folderId: page.drive_folder_id,
+      });
+    }
+  }
+
+  const settings = await loadSettings();
+  if (settings?.drive_folder_id) {
+    targets.push({ key: "", label: "folder bawaan", folderId: settings.drive_folder_id });
+  }
+  return targets;
+}
+
+/** Scans every mapped folder and adds new videos to each page's posting queue. */
 export async function runSync(options: { force?: boolean } = {}): Promise<SyncResult> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const settings = await loadSettings();
 
-  if (!settings?.drive_folder_id) {
-    return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Folder belum dipilih." };
-  }
-  if (!settings.auto_enabled && !options.force) {
+  if (settings && !settings.auto_enabled && !options.force) {
     return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Otomatis sedang mati." };
   }
 
-  const files = await listDriveVideos(settings.drive_folder_id);
+  const targets = await loadSyncTargets();
+  if (targets.length === 0) {
+    return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Folder belum dipilih." };
+  }
+
   const { data: known } = await supabaseAdmin
     .from("upload_jobs")
-    .select("drive_file_id,file_name,status");
+    .select("drive_file_id,file_name,status,facebook_page_id");
   const rows = known ?? [];
-  const seen = new Set(rows.map((row) => row.drive_file_id));
-  // names of videos already published: any Drive file with the same name is a duplicate
-  const publishedNames = new Set(
-    rows.filter((row) => row.status === "success").map((row) => normalizeName(row.file_name)),
-  );
-  const publishedIds = new Set(
-    rows.filter((row) => row.status === "success").map((row) => row.drive_file_id),
-  );
-  let queuedCount = rows.filter((row) => row.status === "queued").length;
-  const limit = settings.queue_limit ?? 10;
+  const limit = settings?.queue_limit ?? 10;
+  const times = settings?.schedule_times ?? ["13:00", "17:00", "19:00"];
 
+  let checked = 0;
   let added = 0;
   let skipped = 0;
   let removed = 0;
-  // oldest first so the queue follows the order videos were added to Drive
-  for (const file of [...files].reverse()) {
-    const isDuplicate = publishedIds.has(file.id) || publishedNames.has(normalizeName(file.name));
-    if (isDuplicate) {
-      try {
-        await driveDeleteFile(file.id);
-        removed += 1;
-        await supabaseAdmin
-          .from("upload_jobs")
-          .update({ drive_deleted_at: new Date().toISOString() })
-          .eq("drive_file_id", file.id);
-      } catch (e) {
-        console.error("Gagal menghapus duplikat di Drive", file.name, e);
+  let totalQueued = 0;
+
+  for (const target of targets) {
+    const files = await listDriveVideos(target.folderId);
+    checked += files.length;
+
+    // duplicates and queue size are tracked per page
+    const own = rows.filter((row) => (row.facebook_page_id ?? "") === target.key);
+    const seen = new Set(own.map((row) => row.drive_file_id));
+    const publishedNames = new Set(
+      own.filter((row) => row.status === "success").map((row) => normalizeName(row.file_name)),
+    );
+    const publishedIds = new Set(
+      own.filter((row) => row.status === "success").map((row) => row.drive_file_id),
+    );
+    let queuedCount = own.filter((row) => row.status === "queued").length;
+
+    // oldest first so the queue follows the order videos were added to Drive
+    for (const file of [...files].reverse()) {
+      const isDuplicate = publishedIds.has(file.id) || publishedNames.has(normalizeName(file.name));
+      if (isDuplicate) {
+        try {
+          await driveDeleteFile(file.id);
+          removed += 1;
+          let cleanup = supabaseAdmin
+            .from("upload_jobs")
+            .update({ drive_deleted_at: new Date().toISOString() })
+            .eq("drive_file_id", file.id);
+          cleanup = target.key
+            ? cleanup.eq("facebook_page_id", target.key)
+            : cleanup.is("facebook_page_id", null);
+          await cleanup;
+        } catch (e) {
+          console.error("Gagal menghapus duplikat di Drive", file.name, e);
+        }
+        continue;
       }
-      continue;
+      if (seen.has(file.id)) {
+        skipped += 1;
+        continue;
+      }
+      if (queuedCount >= limit) {
+        skipped += 1;
+        continue;
+      }
+      await supabaseAdmin.from("upload_jobs").insert({
+        drive_file_id: file.id,
+        file_name: file.name,
+        size_bytes: file.size ? Number(file.size) : null,
+        status: "queued",
+        error_message: null,
+        facebook_page_id: target.key || null,
+        updated_at: new Date().toISOString(),
+      });
+      queuedCount += 1;
+      added += 1;
     }
-    if (seen.has(file.id)) {
-      skipped += 1;
-      continue;
-    }
-    if (queuedCount >= limit) {
-      skipped += 1;
-      continue;
-    }
-    await supabaseAdmin.from("upload_jobs").insert({
-      drive_file_id: file.id,
-      file_name: file.name,
-      size_bytes: file.size ? Number(file.size) : null,
-      status: "queued",
-      error_message: null,
-      updated_at: new Date().toISOString(),
-    });
-    queuedCount += 1;
-    added += 1;
+    totalQueued += queuedCount;
+    await reschedule(times, target.key);
   }
 
-  await reschedule(settings.schedule_times ?? ["13:00", "17:00", "19:00"]);
-
   return {
-    checked: files.length,
+    checked,
     uploaded: 0,
     failed: 0,
     skipped,
@@ -470,8 +524,8 @@ export async function runSync(options: { force?: boolean } = {}): Promise<SyncRe
         added > 0 ? `${added} video baru masuk antrian.` : null,
         removed > 0 ? `${removed} video duplikat dihapus dari Google Drive.` : null,
         added === 0 && removed === 0
-          ? queuedCount > 0
-            ? `Tidak ada video baru. ${queuedCount} video menunggu jadwal.`
+          ? totalQueued > 0
+            ? `Tidak ada video baru. ${totalQueued} video menunggu jadwal.`
             : "Tidak ada video baru."
           : null,
       ]
@@ -480,7 +534,7 @@ export async function runSync(options: { force?: boolean } = {}): Promise<SyncRe
   };
 }
 
-/** Publishes the next video in the queue. Called by the schedule and by the manual button. */
+/** Publishes the next queued video for every page. Called by the schedule and the manual button. */
 export async function publishNext(options: { force?: boolean } = {}): Promise<SyncResult> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const settings = await loadSettings();
@@ -491,37 +545,78 @@ export async function publishNext(options: { force?: boolean } = {}): Promise<Sy
     return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Otomatis sedang mati." };
   }
 
-  const page = await loadActiveFacebookPage();
-  if (!page) {
+  const { data: pages } = await supabaseAdmin
+    .from("facebook_pages")
+    .select("id,name,page_id,access_token,is_active")
+    .eq("is_active", true);
+
+  // one publishing target per saved page, plus the legacy active page for older jobs
+  const targets: Array<{ key: string; page: FacebookPage }> = (pages ?? []).map((p) => ({
+    key: p.id as string,
+    page: p as unknown as FacebookPage,
+  }));
+  const legacy = await loadActiveFacebookPage();
+  if (legacy) targets.push({ key: "", page: legacy });
+  if (targets.length === 0) {
     return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Halaman Facebook belum diatur." };
   }
 
+  const totals = { checked: 0, uploaded: 0, failed: 0, skipped: 0 };
+  const messages: string[] = [];
 
-  const { data: next } = await supabaseAdmin
-    .from("upload_jobs")
-    .select("id,drive_file_id,file_name,size_bytes,scheduled_at")
-    .eq("status", "queued")
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  for (const target of targets) {
+    let query = supabaseAdmin
+      .from("upload_jobs")
+      .select("id,drive_file_id,file_name,size_bytes,scheduled_at")
+      .eq("status", "queued")
+      .order("created_at", { ascending: true })
+      .limit(1);
+    query = target.key
+      ? query.eq("facebook_page_id", target.key)
+      : query.is("facebook_page_id", null);
+    const { data: next } = await query.maybeSingle();
 
-  if (!next) {
-    return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Antrian kosong." };
+    if (!next) continue;
+    // 5 minute grace so a job scheduled exactly at the cron minute still goes out
+    if (
+      !options.force &&
+      next.scheduled_at &&
+      new Date(next.scheduled_at).getTime() - Date.now() > 5 * 60 * 1000
+    ) {
+      totals.skipped += 1;
+      continue;
+    }
+
+    const result = await publishJob(next, target.page, settings, target.key);
+    totals.checked += result.checked;
+    totals.uploaded += result.uploaded;
+    totals.failed += result.failed;
+    if (result.message) messages.push(result.message);
   }
-  // 5 minute grace so a job scheduled exactly at the cron minute still goes out
-  if (
-    !options.force &&
-    next.scheduled_at &&
-    new Date(next.scheduled_at).getTime() - Date.now() > 5 * 60 * 1000
-  ) {
+
+  if (totals.checked === 0) {
     return {
-      checked: 0,
-      uploaded: 0,
-      failed: 0,
-      skipped: 1,
-      message: "Belum waktunya tayang.",
+      ...totals,
+      skipped: totals.skipped,
+      message: totals.skipped > 0 ? "Belum waktunya tayang." : "Antrian kosong.",
     };
   }
+  return { ...totals, message: messages.join(" ") };
+}
+
+/** Publishes a single queued job to its Facebook Page. */
+async function publishJob(
+  next: { id: string; drive_file_id: string; file_name: string; size_bytes: number | null },
+  page: FacebookPage,
+  settings: {
+    title_template: string;
+    description_template: string;
+    post_as_reels: boolean;
+    schedule_times: string[];
+  },
+  pageKey: string,
+): Promise<SyncResult> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   await supabaseAdmin
     .from("upload_jobs")
@@ -555,7 +650,7 @@ export async function publishNext(options: { force?: boolean } = {}): Promise<Sy
       .update({
         status: "success",
         facebook_video_id: videoId,
-        facebook_page_id: page.id,
+        facebook_page_id: pageKey || null,
         published_at: new Date().toISOString(),
         drive_deleted_at: driveDeletedAt,
         updated_at: new Date().toISOString(),
@@ -563,15 +658,16 @@ export async function publishNext(options: { force?: boolean } = {}): Promise<Sy
       .eq("id", next.id);
 
 
-    await reschedule(settings.schedule_times ?? ["13:00", "17:00", "19:00"]);
+    await reschedule(settings.schedule_times ?? ["13:00", "17:00", "19:00"], pageKey);
+    const pageName = page.name ? `[${page.name}] ` : "";
     return {
       checked: 1,
       uploaded: 1,
       failed: 0,
       skipped: 0,
       message: driveDeletedAt
-        ? `${file.name} tayang dan sudah dihapus dari Google Drive.`
-        : `${file.name} tayang, tetapi gagal dihapus dari Google Drive.`,
+        ? `${pageName}${file.name} tayang dan sudah dihapus dari Google Drive.`
+        : `${pageName}${file.name} tayang, tetapi gagal dihapus dari Google Drive.`,
     };
   } catch (error) {
     console.error("Posting gagal", file.name, error);
@@ -638,16 +734,22 @@ export async function getPublishedInsights(limit = 12): Promise<{
   };
 
   const page = await loadActiveFacebookPage();
-  if (!page) {
-    return { ready: false, message: "Halaman Facebook belum diatur.", ...empty };
-  }
-  const token = page.access_token;
-
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: allPages } = await supabaseAdmin
+    .from("facebook_pages")
+    .select("id,access_token");
+  // each video is read with the token of the page it was published to
+  const tokens = new Map<string, string>();
+  for (const p of allPages ?? []) tokens.set(p.id as string, p.access_token as string);
+  const fallbackToken = page?.access_token ?? null;
+  if (tokens.size === 0 && !fallbackToken) {
+    return { ready: false, message: "Halaman Facebook belum diatur.", ...empty };
+  }
+
   const { data: jobs } = await supabaseAdmin
     .from("upload_jobs")
-    .select("id,file_name,facebook_video_id,published_at,updated_at")
+    .select("id,file_name,facebook_video_id,published_at,updated_at,facebook_page_id")
     .eq("status", "success")
     .not("facebook_video_id", "is", null)
     .order("updated_at", { ascending: false })
@@ -680,6 +782,9 @@ export async function getPublishedInsights(limit = 12): Promise<{
         avgWatchSeconds: 0,
       };
       try {
+        const token =
+          (job.facebook_page_id ? tokens.get(job.facebook_page_id) : undefined) ?? fallbackToken;
+        if (!token) return { ...base, error: "Token halaman tidak ditemukan" };
         const res = await fetch(
           `${GRAPH}/${job.facebook_video_id}?fields=${encodeURIComponent(fields)}&access_token=${encodeURIComponent(token)}`,
         );

@@ -13,6 +13,7 @@ import {
   discoverFacebookPages,
   deleteFacebookPage,
   setActiveFacebookPage,
+  setPageFolder,
   type FacebookPage,
   type DiscoveredPage,
 } from "@/lib/automation.functions";
@@ -67,6 +68,7 @@ function SettingsPage() {
   const setActivePageFn = useServerFn(setActiveFacebookPage);
   const discoverFn = useServerFn(discoverFacebookPages);
   const addPagesFn = useServerFn(addFacebookPages);
+  const setPageFolderFn = useServerFn(setPageFolder);
 
   const [folderId, setFolderId] = useState("");
   const [autoEnabled, setAutoEnabled] = useState(false);
@@ -198,6 +200,16 @@ function SettingsPage() {
     mutationFn: (pageId: string | null) => setActivePageFn({ data: { pageId } }),
     onSuccess: () => {
       toast.success("Halaman aktif diperbarui");
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const pageFolder = useMutation({
+    mutationFn: (input: { pageId: string; folderId: string | null; folderName: string | null }) =>
+      setPageFolderFn({ data: input }),
+    onSuccess: () => {
+      toast.success("Folder halaman diperbarui");
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (e: Error) => toast.error(e.message),
@@ -351,26 +363,69 @@ function SettingsPage() {
                     {data.facebookPages.map((page: FacebookPage) => (
                       <li
                         key={page.id}
-                        className="flex items-center justify-between gap-2 rounded-md border border-border/70 px-3 py-2 text-xs"
+                        className="space-y-2 rounded-md border border-border/70 px-3 py-2 text-xs"
                       >
-                        <span className="truncate">
-                          {page.name ?? page.page_id}
-                          {page.is_active ? (
-                            <span className="ml-2 text-muted-foreground">(aktif)</span>
-                          ) : null}
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2 text-destructive hover:text-destructive"
-                          onClick={() => deletePage.mutate(page.id)}
-                          disabled={deletePage.isPending}
-                        >
-                          Hapus
-                        </Button>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate">
+                            {page.name ?? page.page_id}
+                            {page.is_active ? (
+                              <span className="ml-2 text-muted-foreground">(aktif)</span>
+                            ) : null}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-destructive hover:text-destructive"
+                            onClick={() => deletePage.mutate(page.id)}
+                            disabled={deletePage.isPending}
+                          >
+                            Hapus
+                          </Button>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-muted-foreground">
+                            Folder Drive untuk halaman ini
+                          </Label>
+                          <Select
+                            value={page.drive_folder_id ?? "__none__"}
+                            onValueChange={(value) => {
+                              const folder =
+                                value === "__none__"
+                                  ? null
+                                  : (folders.data?.find((f) => f.id === value) ?? null);
+                              pageFolder.mutate({
+                                pageId: page.id,
+                                folderId: folder?.id ?? null,
+                                folderName: folder?.name ?? null,
+                              });
+                            }}
+                            disabled={!data?.driveReady || pageFolder.isPending}
+                          >
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue
+                                placeholder={
+                                  folders.isLoading ? "Memuat folder…" : "Pilih folder"
+                                }
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__none__">Tidak memantau folder</SelectItem>
+                              {(folders.data ?? []).map((folder) => (
+                                <SelectItem key={folder.id} value={folder.id}>
+                                  {folder.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </li>
                     ))}
                   </ul>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Setiap halaman hanya mengambil video dari folder yang dipetakan di atas.
+                    Contoh: halaman “Berbagi Kebaikan” hanya mengambil video dari folder
+                    “FB - Berbagi Kebaikan”.
+                  </p>
                 </div>
               ) : (
                 <p className="text-xs text-muted-foreground">
@@ -478,7 +533,7 @@ function SettingsPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>Folder Google Drive yang dipantau</Label>
+              <Label>Folder bawaan (dipakai bila halaman tidak punya folder sendiri)</Label>
               <Select value={folderId} onValueChange={setFolderId}>
                 <SelectTrigger>
                   <SelectValue placeholder={folders.isLoading ? "Memuat folder…" : "Pilih folder"} />

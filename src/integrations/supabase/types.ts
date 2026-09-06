@@ -66,6 +66,8 @@ export type Database = {
         Row: {
           access_token: string
           created_at: string
+          drive_folder_id: string | null
+          drive_folder_name: string | null
           id: string
           is_active: boolean
           name: string | null
@@ -75,6 +77,8 @@ export type Database = {
         Insert: {
           access_token: string
           created_at?: string
+          drive_folder_id?: string | null
+          drive_folder_name?: string | null
           id?: string
           is_active?: boolean
           name?: string | null
@@ -84,6 +88,8 @@ export type Database = {
         Update: {
           access_token?: string
           created_at?: string
+          drive_folder_id?: string | null
+          drive_folder_name?: string | null
           id?: string
           is_active?: boolean
           name?: string | null

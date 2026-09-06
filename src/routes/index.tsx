@@ -116,7 +116,11 @@ function Home() {
             <Button
               variant="outline"
               onClick={() => sync.mutate()}
-              disabled={sync.isPending || !data?.settings.drive_folder_id}
+              disabled={
+                sync.isPending ||
+                (!data?.settings.drive_folder_id &&
+                  !data?.facebookPages.some((p) => p.drive_folder_id))
+              }
             >
               {sync.isPending ? "Memeriksa…" : "Periksa video baru"}
             </Button>
@@ -171,6 +175,13 @@ function Home() {
                 >
                   <span className="truncate text-foreground">
                     {index + 1}. {job.file_name}
+                    {job.facebook_page_id ? (
+                      <span className="ml-2 text-muted-foreground">
+                        →{" "}
+                        {data?.facebookPages.find((p) => p.id === job.facebook_page_id)?.name ??
+                          "Halaman"}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="shrink-0 text-muted-foreground">
                     {job.scheduled_at

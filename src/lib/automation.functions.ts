@@ -7,6 +7,8 @@ export type FacebookPage = {
   page_id: string;
   access_token: string;
   is_active: boolean;
+  drive_folder_id: string | null;
+  drive_folder_name: string | null;
 };
 
 export type DashboardData = {
@@ -39,6 +41,7 @@ export type DashboardData = {
     facebook_video_id: string | null;
     error_message: string | null;
     size_bytes: number | null;
+    facebook_page_id: string | null;
     created_at: string;
     updated_at: string;
     scheduled_at: string | null;
@@ -61,14 +64,14 @@ export const getDashboard = createServerFn({ method: "GET" }).handler(
     const { data: jobs } = await supabaseAdmin
       .from("upload_jobs")
       .select(
-        "id,file_name,status,facebook_video_id,error_message,size_bytes,created_at,updated_at,scheduled_at,drive_deleted_at",
+        "id,file_name,status,facebook_video_id,error_message,size_bytes,facebook_page_id,created_at,updated_at,scheduled_at,drive_deleted_at",
       )
       .order("updated_at", { ascending: false })
       .limit(50);
 
     const { data: pages } = await supabaseAdmin
       .from("facebook_pages")
-      .select("id,name,page_id,access_token,is_active")
+      .select("id,name,page_id,access_token,is_active,drive_folder_id,drive_folder_name")
       .order("created_at", { ascending: true });
 
     const driveReady = Boolean(
@@ -220,6 +223,31 @@ export const setActiveFacebookPage = createServerFn({ method: "POST" })
         { id: "default", facebook_page_id: data.pageId, updated_at: new Date().toISOString() },
         { onConflict: "id" },
       );
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+/** Maps a Facebook Page to its own Drive folder (or clears the mapping). */
+export const setPageFolder = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        pageId: z.string().uuid(),
+        folderId: z.string().max(200).nullable(),
+        folderName: z.string().max(200).nullable(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error } = await supabaseAdmin
+      .from("facebook_pages")
+      .update({
+        drive_folder_id: data.folderId,
+        drive_folder_name: data.folderName,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", data.pageId);
     if (error) throw new Error(error.message);
     return { ok: true };
   });
