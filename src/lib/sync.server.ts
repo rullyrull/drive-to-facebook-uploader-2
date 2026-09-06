@@ -534,7 +534,7 @@ export async function runSync(options: { force?: boolean } = {}): Promise<SyncRe
   };
 }
 
-/** Publishes the next video in the queue. Called by the schedule and by the manual button. */
+/** Publishes the next queued video for every page. Called by the schedule and the manual button. */
 export async function publishNext(options: { force?: boolean } = {}): Promise<SyncResult> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const settings = await loadSettings();
@@ -545,37 +545,78 @@ export async function publishNext(options: { force?: boolean } = {}): Promise<Sy
     return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Otomatis sedang mati." };
   }
 
-  const page = await loadActiveFacebookPage();
-  if (!page) {
+  const { data: pages } = await supabaseAdmin
+    .from("facebook_pages")
+    .select("id,name,page_id,access_token,is_active")
+    .eq("is_active", true);
+
+  // one publishing target per saved page, plus the legacy active page for older jobs
+  const targets: Array<{ key: string; page: FacebookPage }> = (pages ?? []).map((p) => ({
+    key: p.id as string,
+    page: p as unknown as FacebookPage,
+  }));
+  const legacy = await loadActiveFacebookPage();
+  if (legacy) targets.push({ key: "", page: legacy });
+  if (targets.length === 0) {
     return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Halaman Facebook belum diatur." };
   }
 
+  const totals = { checked: 0, uploaded: 0, failed: 0, skipped: 0 };
+  const messages: string[] = [];
 
-  const { data: next } = await supabaseAdmin
-    .from("upload_jobs")
-    .select("id,drive_file_id,file_name,size_bytes,scheduled_at")
-    .eq("status", "queued")
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  for (const target of targets) {
+    let query = supabaseAdmin
+      .from("upload_jobs")
+      .select("id,drive_file_id,file_name,size_bytes,scheduled_at")
+      .eq("status", "queued")
+      .order("created_at", { ascending: true })
+      .limit(1);
+    query = target.key
+      ? query.eq("facebook_page_id", target.key)
+      : query.is("facebook_page_id", null);
+    const { data: next } = await query.maybeSingle();
 
-  if (!next) {
-    return { checked: 0, uploaded: 0, failed: 0, skipped: 0, message: "Antrian kosong." };
+    if (!next) continue;
+    // 5 minute grace so a job scheduled exactly at the cron minute still goes out
+    if (
+      !options.force &&
+      next.scheduled_at &&
+      new Date(next.scheduled_at).getTime() - Date.now() > 5 * 60 * 1000
+    ) {
+      totals.skipped += 1;
+      continue;
+    }
+
+    const result = await publishJob(next, target.page, settings, target.key);
+    totals.checked += result.checked;
+    totals.uploaded += result.uploaded;
+    totals.failed += result.failed;
+    if (result.message) messages.push(result.message);
   }
-  // 5 minute grace so a job scheduled exactly at the cron minute still goes out
-  if (
-    !options.force &&
-    next.scheduled_at &&
-    new Date(next.scheduled_at).getTime() - Date.now() > 5 * 60 * 1000
-  ) {
+
+  if (totals.checked === 0) {
     return {
-      checked: 0,
-      uploaded: 0,
-      failed: 0,
-      skipped: 1,
-      message: "Belum waktunya tayang.",
+      ...totals,
+      skipped: totals.skipped,
+      message: totals.skipped > 0 ? "Belum waktunya tayang." : "Antrian kosong.",
     };
   }
+  return { ...totals, message: messages.join(" ") };
+}
+
+/** Publishes a single queued job to its Facebook Page. */
+async function publishJob(
+  next: { id: string; drive_file_id: string; file_name: string; size_bytes: number | null },
+  page: FacebookPage,
+  settings: {
+    title_template: string;
+    description_template: string;
+    post_as_reels: boolean;
+    schedule_times: string[];
+  },
+  pageKey: string,
+): Promise<SyncResult> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   await supabaseAdmin
     .from("upload_jobs")
