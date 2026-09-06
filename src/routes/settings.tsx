@@ -533,7 +533,7 @@ function SettingsPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>Folder Google Drive yang dipantau</Label>
+              <Label>Folder bawaan (dipakai bila halaman tidak punya folder sendiri)</Label>
               <Select value={folderId} onValueChange={setFolderId}>
                 <SelectTrigger>
                   <SelectValue placeholder={folders.isLoading ? "Memuat folder…" : "Pilih folder"} />

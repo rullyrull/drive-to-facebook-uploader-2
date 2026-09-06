@@ -116,7 +116,11 @@ function Home() {
             <Button
               variant="outline"
               onClick={() => sync.mutate()}
-              disabled={sync.isPending || !data?.settings.drive_folder_id}
+              disabled={
+                sync.isPending ||
+                (!data?.settings.drive_folder_id &&
+                  !data?.facebookPages.some((p) => p.drive_folder_id))
+              }
             >
               {sync.isPending ? "Memeriksa…" : "Periksa video baru"}
             </Button>
