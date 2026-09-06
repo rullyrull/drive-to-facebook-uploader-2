@@ -734,16 +734,22 @@ export async function getPublishedInsights(limit = 12): Promise<{
   };
 
   const page = await loadActiveFacebookPage();
-  if (!page) {
-    return { ready: false, message: "Halaman Facebook belum diatur.", ...empty };
-  }
-  const token = page.access_token;
-
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: allPages } = await supabaseAdmin
+    .from("facebook_pages")
+    .select("id,access_token");
+  // each video is read with the token of the page it was published to
+  const tokens = new Map<string, string>();
+  for (const p of allPages ?? []) tokens.set(p.id as string, p.access_token as string);
+  const fallbackToken = page?.access_token ?? null;
+  if (tokens.size === 0 && !fallbackToken) {
+    return { ready: false, message: "Halaman Facebook belum diatur.", ...empty };
+  }
+
   const { data: jobs } = await supabaseAdmin
     .from("upload_jobs")
-    .select("id,file_name,facebook_video_id,published_at,updated_at")
+    .select("id,file_name,facebook_video_id,published_at,updated_at,facebook_page_id")
     .eq("status", "success")
     .not("facebook_video_id", "is", null)
     .order("updated_at", { ascending: false })
